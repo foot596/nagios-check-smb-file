@@ -19,6 +19,7 @@
 use strict;
 use POSIX;
 use Getopt::Long;
+use Digest::MD5;
 
 #####################################################################################
 ### Variable Declarations
@@ -47,6 +48,7 @@ my $o_warning_match;
 my $o_critical_match;
 my $o_warning_files;
 my $o_critical_files;
+my $o_md5_match;
 my $o_filename_match;
 my $o_expand_datetime;
 my $o_mode_directory;
@@ -138,6 +140,7 @@ This plugin tests the existence/age/size/contents of a file/folder on a SMB shar
     -M, --critical-match  <regex>       Critical if contents match regex
     -t, --warning-files   <value>       Warning if the total files detected exceeds value
     -T, --critical-files  <value>       Critical if the total files detected exceeds value
+    -5, --md5-match       <value>       Critical if MD5 hash for file does not match value
     -p, --property        <property>    The property to test (Default: modified)
     -e, --expand-datetime               Expand DateTime variables used in file paths 
     -K, --kerberos                      Use Kerberos for authentication
@@ -213,6 +216,11 @@ Examples
     Check for a file using DateTime variables. They will expand to the values they represent.
 
     $0 -H fileserver -U username -P password -W domainname -f 'C\$\$/AppLogs/%m%d.log' -e
+
+    Critical if the calculated MD5 hash for file does not match a specific hash
+
+    $0 -H fileserver -U username -P password -W domainname -f 'Share/log/file.txt' \\
+        --md5-match 3844267286df5605d7acdfc2b094dfc5
 EOT
 }
 
@@ -307,6 +315,35 @@ sub checkFileContents {
         }
     }
     $smb->close($fd);
+
+    return ($output, $check_state);
+}
+
+#------------------------------------------------------------------------------------
+# Read a file over SMB and check its MD5 hash
+#------------------------------------------------------------------------------------
+sub checkFileMd5 {
+    my $smb = shift;
+    my $filepath = shift;
+    my $md5_match = shift;
+    my $check_state = 'OK';
+    my $output;
+
+    my $fd = $smb->open($filepath, '0666');
+    my $checksum = Digest::MD5->new;
+
+    while (defined(my $line = $smb->read($fd, 1024))) {
+        last if $line eq '';
+        $checksum->add($line);
+    }
+    $smb->close($fd);
+
+    my $md5 = $checksum->hexdigest;  
+
+    if ($md5 ne $md5_match) {
+        $output = "File md5 not matches: $md5";
+        $check_state = 'CRITICAL';
+    }
 
     return ($output, $check_state);
 }
@@ -434,6 +471,7 @@ GetOptions(
     't|warning-files=s'  => \$o_warning_files,
     'T|critical-files=s' => \$o_critical_files,
     'F|filename-match=s' => \$o_filename_match,
+    '5|md5-match=s'      => \$o_md5_match,
     'e|expand-datetime'  => \$o_expand_datetime,
     'C|match-case'       => \$o_match_case,
     'D|mode-directory'   => \$o_mode_directory,
@@ -570,6 +608,16 @@ if ($o_filename_match || $o_mode_directory) {
                 push(@warning_matches,$key);
             }
         }
+        if ($o_md5_match) {
+            my ($match_output, $check_state) = checkFileMd5(
+                $smb,
+                'smb://' . $o_host . '/' . $key,
+                $o_md5_match
+            );
+            if ($match_output and $check_state eq 'CRITICAL') {
+                push(@critical_matches,$key);
+            }
+        }
         if (!$o_no_data) {
             $PERF_DATA{$key} = getPerformanceDataForProperty(
                 $warning_value, $warning_uom,
@@ -633,6 +681,14 @@ else {
             $full_file_path,
             $o_warning_match,
             $o_critical_match
+        );
+        showOutputAndExit($output, $check_state) if ($output);
+    }
+    if ($o_md5_match) {
+        my ($output, $check_state) = checkFileMd5(
+            $smb,
+            $full_file_path,
+            $o_md5_match
         );
         showOutputAndExit($output, $check_state) if ($output);
     }
